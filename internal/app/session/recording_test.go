@@ -224,24 +224,25 @@ func TestMicrophoneIsDroppedWhileAnnouncing(t *testing.T) {
 		t.Fatal("the line was not handed back after the announcement stopped")
 	}
 
-	rec := s.recorderFor("call-1")
-	if rec == nil {
-		t.Fatal("no recorder")
-	}
+	// Counters rather than buffer levels: the recorder's clock drains as it
+	// writes, so reading the buffer races with it. These are exact.
+	c := s.contador("call-1")
 
-	// The clock drains the buffer as it writes frames, so this reads what has not
-	// been written yet. What matters is the comparison: dropped audio can never
-	// show up here, and audio that got through does, at least briefly.
-	if out, _ := rec.Buffered(); out != 0 {
-		t.Errorf("%d samples of microphone audio reached the recorder during the announcement", out)
+	if c.doNavegador != 25 || c.descartados != 25 {
+		t.Errorf("esperava 25 quadros do navegador e 25 descartados, veio %d e %d",
+			c.doNavegador, c.descartados)
+	}
+	if c.paraOContato != 0 {
+		t.Errorf("%d quadros do microfone chegaram ao contato durante o aviso", c.paraOContato)
 	}
 
 	// And once the announcement is over, the microphone is back.
 	for range 25 {
 		s.feedOutbound("call-1", tone(320, 0.9), true)
 	}
-	if out, _ := rec.Buffered(); out == 0 {
-		t.Error("the microphone never came back after the announcement")
+
+	if c.descartados != 25 {
+		t.Errorf("o microfone continuou sendo descartado depois do aviso: %d", c.descartados)
 	}
 
 	s.teardownCallAudio("call-1")

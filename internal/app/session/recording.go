@@ -3,6 +3,7 @@ package session
 import (
 	"fmt"
 	"sync"
+	"sync/atomic"
 
 	"wacalls/internal/app/events"
 	"wacalls/internal/app/player"
@@ -41,13 +42,39 @@ type callAudio struct {
 	mu        sync.Mutex
 	recorders map[string]*record.Recorder
 	players   map[string]*player.Player
+	// Frame counters per call, reported once at teardown.
+	//
+	// They exist because "the contact could not hear the agent" is otherwise
+	// almost undiagnosable from the outside: the recording proves audio reached
+	// this layer, but not that it reached the encoder. These separate the two.
+	contadores map[string]*contadorDeAudio
+}
+
+type contadorDeAudio struct {
+	doNavegador    int64
+	descartados    int64
+	paraOContato   int64
+	semCallManager int64
 }
 
 func newCallAudio() *callAudio {
 	return &callAudio{
-		recorders: map[string]*record.Recorder{},
-		players:   map[string]*player.Player{},
+		recorders:  map[string]*record.Recorder{},
+		players:    map[string]*player.Player{},
+		contadores: map[string]*contadorDeAudio{},
 	}
+}
+
+func (s *Session) contador(callID string) *contadorDeAudio {
+	s.audio.mu.Lock()
+	defer s.audio.mu.Unlock()
+
+	c, ok := s.audio.contadores[callID]
+	if !ok {
+		c = &contadorDeAudio{}
+		s.audio.contadores[callID] = c
+	}
+	return c
 }
 
 // startRecording opens a recording for a call that just connected. Idempotent,
@@ -150,6 +177,31 @@ func (s *Session) announcing(callID string) bool {
 func (s *Session) teardownCallAudio(callID string) {
 	s.stopAnnouncement(callID)
 	s.finishRecording(callID)
+	s.reportarContadores(callID)
+}
+
+// reportarContadores logs how much audio moved in each direction and forgets it.
+//
+// One line per call, and it answers the question that is otherwise a guess: if
+// paraOContato is high the audio reached the encoder and the fault is further
+// down; if it is zero while doNavegador is high, it never left this layer.
+func (s *Session) reportarContadores(callID string) {
+	s.audio.mu.Lock()
+	c := s.audio.contadores[callID]
+	delete(s.audio.contadores, callID)
+	s.audio.mu.Unlock()
+
+	if c == nil {
+		return
+	}
+
+	s.log.Info("call audio frames",
+		"call_id", callID,
+		"from_browser", atomic.LoadInt64(&c.doNavegador),
+		"dropped_during_announcement", atomic.LoadInt64(&c.descartados),
+		"forwarded_to_contact", atomic.LoadInt64(&c.paraOContato),
+		"no_call_manager", atomic.LoadInt64(&c.semCallManager),
+	)
 }
 
 // teardownAllCallAudio releases everything, for session shutdown.
@@ -162,6 +214,13 @@ func (s *Session) teardownAllCallAudio() {
 	for id := range s.audio.players {
 		if _, dup := s.audio.recorders[id]; !dup {
 			ids = append(ids, id)
+		}
+	}
+	for id := range s.audio.contadores {
+		if _, dup := s.audio.recorders[id]; !dup {
+			if _, dup2 := s.audio.players[id]; !dup2 {
+				ids = append(ids, id)
+			}
 		}
 	}
 	s.audio.mu.Unlock()
@@ -177,8 +236,15 @@ func (s *Session) teardownAllCallAudio() {
 // because the microphone is dropped while an announcement is playing and the
 // announcement itself obviously is not.
 func (s *Session) feedOutbound(callID string, pcm []float32, fromBrowser bool) {
-	if fromBrowser && s.announcing(callID) {
-		return
+	contador := s.contador(callID)
+
+	if fromBrowser {
+		atomic.AddInt64(&contador.doNavegador, 1)
+
+		if s.announcing(callID) {
+			atomic.AddInt64(&contador.descartados, 1)
+			return
+		}
 	}
 
 	s.recorderFor(callID).WriteOutbound(pcm)
@@ -201,6 +267,9 @@ func (s *Session) feedOutbound(callID string, pcm []float32, fromBrowser bool) {
 
 	if cm, ok := s.calls.Get(callID); ok {
 		cm.FeedCapturedPCM(pcm)
+		atomic.AddInt64(&contador.paraOContato, 1)
+	} else {
+		atomic.AddInt64(&contador.semCallManager, 1)
 	}
 }
 
