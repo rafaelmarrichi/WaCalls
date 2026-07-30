@@ -2,6 +2,7 @@ package player
 
 import (
 	"encoding/binary"
+	"fmt"
 	"io"
 	"log/slog"
 	"os"
@@ -409,5 +410,81 @@ func TestPlaybackGoroutineIsTracked(t *testing.T) {
 	}
 	if n := obs.live(); n != 0 {
 		t.Errorf("%d goroutines still registered after Stop", n)
+	}
+}
+
+// The name with and without the extension is the same file, so it has to be the
+// same cache entry. It was not: "aviso" and "aviso.wav" had separate entries
+// pointing at one file, and replacing through one left the other serving the old
+// audio for as long as the process lived. For the legal announcement that means
+// playing a superseded notice, or a deleted one, with nothing anywhere to show
+// for it.
+func TestLibraryCacheIgnoresTheExtension(t *testing.T) {
+	lib := NewLibrary(t.TempDir())
+
+	if _, err := lib.Store("aviso", monoWAV(t, 16000)); err != nil {
+		t.Fatalf("Store: %v", err)
+	}
+
+	// Aquece as duas entradas que antes eram separadas.
+	for _, nome := range []string{"aviso", "aviso.wav"} {
+		pcm, err := lib.Get(nome)
+		if err != nil {
+			t.Fatalf("Get(%q): %v", nome, err)
+		}
+		if len(pcm) != 16000 {
+			t.Fatalf("Get(%q): want 16000 samples, got %d", nome, len(pcm))
+		}
+	}
+
+	// Sobe pela forma com extensão; a forma sem extensão precisa enxergar.
+	if _, err := lib.Store("aviso.wav", monoWAV(t, 8000)); err != nil {
+		t.Fatalf("re-Store: %v", err)
+	}
+
+	for _, nome := range []string{"aviso", "aviso.wav"} {
+		pcm, err := lib.Get(nome)
+		if err != nil {
+			t.Fatalf("Get(%q) após troca: %v", nome, err)
+		}
+		if len(pcm) != 8000 {
+			t.Errorf("Get(%q) devolveu o aviso antigo: %d amostras", nome, len(pcm))
+		}
+	}
+
+	// E apagar por uma forma apaga para as duas.
+	if err := lib.Delete("aviso"); err != nil {
+		t.Fatalf("Delete: %v", err)
+	}
+	for _, nome := range []string{"aviso", "aviso.wav"} {
+		if _, err := lib.Get(nome); err == nil {
+			t.Errorf("Get(%q) funcionou depois de apagado", nome)
+		}
+	}
+}
+
+// Cache sem teto vira vazamento num processo que roda por meses: cada nome
+// distinto que toca uma vez fica residente como PCM decodificado.
+func TestLibraryCacheIsBounded(t *testing.T) {
+	lib := NewLibrary(t.TempDir())
+
+	for i := range tetoDoCache + 10 {
+		nome := fmt.Sprintf("aviso-v%d", i)
+		if _, err := lib.Store(nome, monoWAV(t, 320)); err != nil {
+			t.Fatalf("Store(%q): %v", nome, err)
+		}
+	}
+
+	lib.mu.RLock()
+	tamanho := len(lib.cache)
+	lib.mu.RUnlock()
+
+	if tamanho > tetoDoCache {
+		t.Errorf("cache passou do teto: %d entradas, teto %d", tamanho, tetoDoCache)
+	}
+
+	// Sair do cache não pode perder o asset: a próxima reprodução lê do disco.
+	if _, err := lib.Get("aviso-v0"); err != nil {
+		t.Errorf("asset descartado do cache não voltou do disco: %v", err)
 	}
 }
