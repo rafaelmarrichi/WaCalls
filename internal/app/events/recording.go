@@ -6,13 +6,16 @@ import "time"
 // fork. Kept in their own file so reapplying the patch after an upstream
 // snapshot touches webhook.go in one place only.
 
-// RecordingRecord describes a finished recording. Path is local to the engine:
-// the consumer fetches the file over the recording endpoint and deletes it once
-// it has been stored elsewhere.
+// RecordingRecord describes a finished recording.
+//
+// The consumer fetches the file over the recording endpoint, addressed by
+// session and call id. The absolute path on the engine's disk is deliberately
+// not in the payload: it is of no use to the consumer and would end up copied
+// into its logs and its database, describing this machine's filesystem layout.
 type RecordingRecord struct {
 	CallID     string `json:"callId"`
 	SessionID  string `json:"sessionId"`
-	Path       string `json:"path"`
+	Path       string `json:"-"`
 	DurationMs int64  `json:"durationMs"`
 	SizeBytes  int64  `json:"sizeBytes"`
 	// SHA256 of the WAV as written here, so whoever downloads it can tell a
@@ -24,19 +27,37 @@ type RecordingRecord struct {
 	// Truncated is set when the file hit its size ceiling and recording stopped
 	// before the call did.
 	Truncated bool `json:"truncated"`
+	// Failed is set when closing the file errored. The recording is announced
+	// anyway: it holds real conversation up to the point of failure, and an
+	// unannounced file sits on the engine's disk invisible to the consumer,
+	// which is the only party that applies the retention rules. Better to hand
+	// it over marked as suspect than to leave audio nobody will ever delete.
+	Failed bool `json:"failed"`
 }
 
 // EmitRecording announces a finished recording over the webhook and the event
 // stream.
 //
-// This fires while the call is being torn down, before call.ended, because the
-// recorder is closed as part of teardown and the file has to be announced while
-// the call record still exists. Consumers must not assume the call is already
-// marked ended when this arrives.
-func (b *Broker) EmitRecording(r RecordingRecord) {
+// `snapshot` is the call as it was when teardown began, and passing it is not
+// optional in practice. Closing a recording runs off the hot path now, so by the
+// time this fires the call is usually already out of the registry: looking it up
+// here would produce a payload with an empty status, peer and direction, which
+// any consumer validating its input rejects. And it does reject, silently, three
+// retries later, with the audio sitting on disk and the panel showing "sem
+// gravação".
+//
+// Pass nil only when there is genuinely no call record to describe.
+func (b *Broker) EmitRecording(snapshot *CallRecord, r RecordingRecord) {
 	rec := CallRecord{SessionID: r.SessionID, CallID: r.CallID}
-	if live, ok := b.GetCall(r.CallID); ok {
-		rec = *live
+
+	switch {
+	case snapshot != nil:
+		rec = *snapshot
+	default:
+		// Último recurso, para quem chamar sem retrato.
+		if live, ok := b.GetCall(r.CallID); ok {
+			rec = *live
+		}
 	}
 
 	b.webhooks.enqueueRecording(rec, r)

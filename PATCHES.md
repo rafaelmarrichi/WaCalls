@@ -61,6 +61,38 @@ atendida um minuto depois.
 `CallManager`. Há teste de regressão em `internal/voip/call/observer_access_test.go`, e ele falha na
 versão defeituosa.
 
+### A mesma regra, na versão lenta
+
+A revisão de julho/2026 achou o irmão do deadlock, que não trava mas congela. `removeCall` roda
+dentro do mesmo `OnStateChange`, com o mesmo mutex tomado e na goroutine que entrega os eventos do
+WhatsApp da sessão inteira. Ele fechava a gravação ali mesmo: drenar até cem quadros para o disco,
+gravar o cabeçalho e **reler o arquivo inteiro para calcular o sha256**. Numa chamada de cinquenta
+minutos são uns 190 MB, e durante esses segundos nenhum evento daquele chip era processado, o que
+afeta as outras chamadas do mesmo número.
+
+O fechamento agora roda em goroutine própria, registrada no observer da chamada. O desligamento da
+sessão espera por elas (`aguardarFechamentos`), senão o processo poderia sair com um WAV de cabeçalho
+zerado, que nenhum player abre, para uma conversa que aconteceu de verdade.
+
+**A regra ampliada:** nada alcançável a partir de `OnStateChange` pode tomar o mutex do
+`CallManager` **nem fazer trabalho demorado**. Ler ou escrever disco, calcular hash e falar com a
+rede vão para goroutine.
+
+**E o que essa mudança quebrou.** Sair do caminho síncrono custou uma garantia que o código
+dependia sem dizer: `removeCall` fechava a gravação **antes** de a chamada sair do registro do
+broker, e `EmitRecording` buscava lá os dados da chamada para montar o webhook. Com o fechamento em
+goroutine, a busca passou a acontecer depois, e o payload saía com `status`, `peer` e `direction`
+vazios. Quem consome valida a entrada e recusou, três entregas seguidas, sem que nada além de uma
+linha de erro aparecesse: a gravação ficava no disco e o painel dizia "sem gravação".
+
+O retrato da chamada agora é tirado em `finishRecording`, de forma síncrona, e carregado para
+dentro da goroutine. Há teste em `internal/app/events/broker_test.go`
+(`TestRecordingWebhookCarriesTheCallAfterItLeftTheRegistry`) que confere o **corpo entregue**, e ele
+falha na versão defeituosa.
+
+**A lição maior:** quando mover trabalho para outra goroutine, procure o que o código lia do mundo
+por estar num certo ponto do tempo. Aqui era o registro de chamadas vivas.
+
 ### Arquivos do upstream tocados
 
 | Arquivo                            | Alteração                                                           |

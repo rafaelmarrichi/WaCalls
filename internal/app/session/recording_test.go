@@ -181,6 +181,9 @@ func TestAnnouncementLandsInTheRecording(t *testing.T) {
 	}
 
 	s.teardownCallAudio("call-1")
+	// O fechamento roda fora do caminho quente, então o arquivo só está
+	// completo depois disto. É a mesma espera que o desligamento da sessão faz.
+	s.aguardarFechamentos()
 
 	left, _ := wavChannels(t, filepath.Join(recordDir, s.ID(), "call-1.wav"))
 	if !anyNonZero(left) {
@@ -226,7 +229,7 @@ func TestMicrophoneIsDroppedWhileAnnouncing(t *testing.T) {
 
 	// Counters rather than buffer levels: the recorder's clock drains as it
 	// writes, so reading the buffer races with it. These are exact.
-	c := s.contador("call-1")
+	c := s.contador("call-1", true)
 
 	if c.doNavegador != 25 || c.descartados != 25 {
 		t.Errorf("esperava 25 quadros do navegador e 25 descartados, veio %d e %d",
@@ -288,6 +291,7 @@ func TestTeardownIsIdempotentAndClosesTheFile(t *testing.T) {
 	s.teardownCallAudio("call-1")
 	s.teardownCallAudio("call-1")
 	s.teardownAllCallAudio()
+	s.aguardarFechamentos()
 
 	if s.recorderFor("call-1") != nil {
 		t.Error("the recorder is still registered after teardown")

@@ -9,6 +9,7 @@ import (
 	"wacalls/internal/app/player"
 	"wacalls/internal/app/record"
 	"wacalls/internal/voip/call"
+	"wacalls/internal/voip/core"
 )
 
 // Recording and announcement playback for a session's live calls.
@@ -48,6 +49,12 @@ type callAudio struct {
 	// almost undiagnosable from the outside: the recording proves audio reached
 	// this layer, but not that it reached the encoder. These separate the two.
 	contadores map[string]*contadorDeAudio
+	// Observer of each live call, so closing a recording off the hot path can
+	// still register its goroutine for shutdown.
+	observers map[string]core.CallObserver
+	// Waits for the closing goroutines. Session shutdown drains this so the
+	// process does not exit with a half-written WAV on disk.
+	fechando sync.WaitGroup
 }
 
 type contadorDeAudio struct {
@@ -62,16 +69,30 @@ func newCallAudio() *callAudio {
 		recorders:  map[string]*record.Recorder{},
 		players:    map[string]*player.Player{},
 		contadores: map[string]*contadorDeAudio{},
+		observers:  map[string]core.CallObserver{},
 	}
 }
 
-func (s *Session) contador(callID string) *contadorDeAudio {
+// contador devolve o contador da chamada.
+//
+// `criar` só é verdadeiro na conexão da chamada. No caminho de mídia ele é
+// falso, e a razão é o teardown: ele reporta e apaga a entrada, e um último
+// quadro do navegador ou um tique do player logo depois recriaria o registro
+// para um id que nunca mais terá teardown. A entrada é pequena, mas fica no mapa
+// para sempre, e num processo que roda por meses com alto volume de discagem
+// isso é vazamento.
+//
+// Quadro atrasado recebe um contador descartável: ele soma, e ninguém lê.
+func (s *Session) contador(callID string, criar bool) *contadorDeAudio {
 	s.audio.mu.Lock()
 	defer s.audio.mu.Unlock()
 
-	c, ok := s.audio.contadores[callID]
-	if !ok {
-		c = &contadorDeAudio{}
+	if c, ok := s.audio.contadores[callID]; ok {
+		return c
+	}
+
+	c := &contadorDeAudio{}
+	if criar {
 		s.audio.contadores[callID] = c
 	}
 	return c
@@ -81,6 +102,11 @@ func (s *Session) contador(callID string) *contadorDeAudio {
 // because the connected state is reported again after a media reconnect and must
 // not start a second file.
 func (s *Session) startRecording(callID string, cm *call.CallManager) {
+	// Antes do desvio de gravação desligada, e antes de qualquer áudio: é aqui
+	// que o contador da chamada nasce, e o caminho de mídia nunca cria nenhum.
+	// Ver `contador`.
+	s.contador(callID, true)
+
 	if !s.mgr.audioCfg.recordingEnabled() {
 		return
 	}
@@ -115,6 +141,7 @@ func (s *Session) startRecording(callID string, cm *call.CallManager) {
 		return
 	}
 	s.audio.recorders[callID] = rec
+	s.audio.observers[callID] = cm.Observer()
 	s.audio.mu.Unlock()
 }
 
@@ -127,32 +154,76 @@ func (s *Session) recorderFor(callID string) *record.Recorder {
 // finishRecording closes the file and announces it. Idempotent: teardown reaches
 // this from the ended state change, from the ended callback and from session
 // shutdown, and all three run for a normal hang-up.
+//
+// Closing runs on its own goroutine, and that is not an optimisation. The ended
+// state change fires from OnStateChange, which the CallManager invokes while
+// holding its own mutex, on the goroutine that delivers WhatsApp events for the
+// whole session. Closing does real disk work: it drains up to a hundred queued
+// frames, flushes, patches the header, and then reads the entire file back to
+// hash it, which for a fifty-minute call is around 190 MB. Doing that inline
+// froze every other call on the same chip until it finished.
+//
+// The goroutine is registered with the call's observer so an orderly shutdown
+// waits for it, and `fechando` is what session shutdown drains before returning.
+//
+// The call record is captured HERE, synchronously, and carried into the
+// goroutine. It has to be: this runs inside removeCall, before the call leaves
+// the broker's registry, and by the time the goroutine finishes writing the file
+// the registry no longer knows this call. Looking the record up from in there
+// would announce the recording with an empty status and peer, and a consumer
+// that validates its input rejects that without a word.
 func (s *Session) finishRecording(callID string) {
 	s.audio.mu.Lock()
 	rec := s.audio.recorders[callID]
+	obs := s.audio.observers[callID]
 	delete(s.audio.recorders, callID)
+	delete(s.audio.observers, callID)
+	if rec != nil {
+		s.audio.fechando.Add(1)
+	}
 	s.audio.mu.Unlock()
 
 	if rec == nil {
 		return
 	}
 
-	res, err := rec.Close()
-	if err != nil {
-		s.log.Error("closing the recording failed", "call_id", callID, "err", err)
-		return
+	if obs == nil {
+		obs = core.NopObserver{}
 	}
 
-	s.mgr.broker.EmitRecording(events.RecordingRecord{
-		CallID:        callID,
-		SessionID:     s.id,
-		Path:          res.Path,
-		DurationMs:    res.DurationMs,
-		SizeBytes:     res.SizeBytes,
-		SHA256:        res.SHA256,
-		FramesDropped: res.FramesDropped,
-		Truncated:     res.Truncated,
-	})
+	snapshot, _ := s.mgr.broker.GetCall(callID)
+	done := obs.TrackGoroutine()
+
+	go func() {
+		defer s.audio.fechando.Done()
+		defer done()
+
+		res, err := rec.Close()
+		if err != nil {
+			// Emite mesmo assim. O arquivo tem áudio de conversa real até o
+			// ponto da falha, e sem o webhook ele fica no disco do motor
+			// invisível para a API, que é quem aplica a retenção: ninguém nunca
+			// o apagaria. Melhor anunciar como falho e deixar a decisão com quem
+			// conhece as regras do cliente.
+			s.log.Error("closing the recording failed", "call_id", callID, "err", err)
+		}
+
+		if res.Path == "" {
+			return
+		}
+
+		s.mgr.broker.EmitRecording(snapshot, events.RecordingRecord{
+			CallID:        callID,
+			SessionID:     s.id,
+			Path:          res.Path,
+			DurationMs:    res.DurationMs,
+			SizeBytes:     res.SizeBytes,
+			SHA256:        res.SHA256,
+			FramesDropped: res.FramesDropped,
+			Truncated:     res.Truncated,
+			Failed:        err != nil,
+		})
+	}()
 }
 
 // stopAnnouncement ends any announcement on a call and forgets it.
@@ -228,6 +299,17 @@ func (s *Session) teardownAllCallAudio() {
 	for _, id := range ids {
 		s.teardownCallAudio(id)
 	}
+
+	s.aguardarFechamentos()
+}
+
+// aguardarFechamentos blocks until every recording being closed is on disk.
+//
+// Closing runs off the hot path, so a shutdown that returned immediately would
+// leave the process free to exit with a WAV whose header still reads zero
+// length: a file no player opens, for a conversation that really happened.
+func (s *Session) aguardarFechamentos() {
+	s.audio.fechando.Wait()
 }
 
 // feedOutbound is the only path for audio going to the contact.
@@ -236,7 +318,7 @@ func (s *Session) teardownAllCallAudio() {
 // because the microphone is dropped while an announcement is playing and the
 // announcement itself obviously is not.
 func (s *Session) feedOutbound(callID string, pcm []float32, fromBrowser bool) {
-	contador := s.contador(callID)
+	contador := s.contador(callID, false)
 
 	if fromBrowser {
 		atomic.AddInt64(&contador.doNavegador, 1)
@@ -300,13 +382,24 @@ func (s *Session) PlayAnnouncement(callID, asset string) (int64, error) {
 		return 0, err
 	}
 
-	s.stopAnnouncement(callID)
-
 	// Registered under the lock so a very short asset cannot finish, and run its
 	// OnDone, before this player is even recorded. OnDone takes the same lock, so
 	// it waits the few microseconds until the registration is done.
+	//
+	// The old player is taken out inside the same critical section, and stopped
+	// only after the lock is released. Stopping first, outside the lock, left a
+	// window where two concurrent play requests both cleared the slot and then
+	// both registered: the loser's player kept running outside the map, playing
+	// over the winner and out of reach of stopplay and of teardown.
 	s.audio.mu.Lock()
 	defer s.audio.mu.Unlock()
+
+	if anterior := s.audio.players[callID]; anterior != nil {
+		delete(s.audio.players, callID)
+		// Stop does not block, so calling it here does not hold the mutex for
+		// any meaningful time.
+		anterior.Stop()
+	}
 
 	// Declared before Start so OnDone can compare against this exact player. The
 	// mutex is what makes reading it safe: OnDone only reads p while holding the

@@ -3,7 +3,9 @@ package events
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"log/slog"
+	"net/http"
 	"net/http/httptest"
 	"strings"
 	"sync"
@@ -257,5 +259,104 @@ func TestNilRecordStoreIsSafe(t *testing.T) {
 	rows, _, err := b.HistoryRows(context.Background(), "", 10, core.HistoryCursor{})
 	if err != nil || len(rows) != 0 {
 		t.Fatalf("nil store must yield empty history without error, got %+v err %v", rows, err)
+	}
+}
+
+// The recording webhook has to describe the call, and by the time it fires the
+// call is usually gone from the registry: closing a recording moved off the hot
+// path, so the file is only finished after teardown already removed the record.
+//
+// This is not hypothetical. It shipped: the payload went out with an empty
+// status and peer, the consumer's schema rejected it, three deliveries failed,
+// and a real recording sat on disk while the panel said the call had none.
+//
+// The assertion is on the delivered body, not on an intermediate value, because
+// the body is what the consumer validates and the body is what was wrong.
+func TestRecordingWebhookCarriesTheCallAfterItLeftTheRegistry(t *testing.T) {
+	recebido := make(chan map[string]any, 8)
+
+	servidor := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		corpo, _ := io.ReadAll(r.Body)
+		var ev map[string]any
+		if err := json.Unmarshal(corpo, &ev); err == nil {
+			recebido <- ev
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer servidor.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	b := NewBroker(nil, slog.Default())
+	if !b.EnableWebhooks(ctx, servidor.URL, "segredo") {
+		t.Fatal("webhooks não ligaram")
+	}
+
+	b.UpsertCall(CallRecord{
+		SessionID: "s1",
+		CallID:    "c1",
+		Direction: "outbound",
+		Peer:      "5519999999999@s.whatsapp.net",
+		StartedAt: 1_700_000_000_000,
+		Status:    StatusConnected,
+	})
+
+	// A ordem real do teardown: o retrato sai enquanto a chamada existe, e o
+	// arquivo só termina de fechar depois que ela saiu do registro.
+	snapshot, ok := b.GetCall("c1")
+	if !ok {
+		t.Fatal("a chamada deveria estar no registro antes do teardown")
+	}
+	b.EndCall("c1", "user_ended")
+
+	b.EmitRecording(snapshot, RecordingRecord{
+		CallID: "c1", SessionID: "s1", DurationMs: 17680, SizeBytes: 1131564,
+	})
+
+	// `UpsertCall` e `EndCall` também disparam webhook, então a fila traz
+	// `call.active` e `call.ended` antes. Espera o que interessa.
+	prazo := time.After(3 * time.Second)
+	var gravacaoEv map[string]any
+
+	for gravacaoEv == nil {
+		select {
+		case ev := <-recebido:
+			if ev["event"] == "call.recording" {
+				gravacaoEv = ev
+			}
+		case <-prazo:
+			t.Fatal("o webhook de gravação nunca foi entregue")
+		}
+	}
+
+	{
+		ev := gravacaoEv
+		call, _ := ev["call"].(map[string]any)
+		if call == nil {
+			t.Fatal("o payload não trouxe o objeto da chamada")
+		}
+
+		// Estes quatro são obrigatórios no schema de quem consome. Vazio aqui é
+		// exatamente o defeito que este teste existe para não deixar voltar.
+		for campo, esperado := range map[string]any{
+			"status":    "connected",
+			"peer":      "5519999999999@s.whatsapp.net",
+			"direction": "outbound",
+			"sessionId": "s1",
+		} {
+			if call[campo] != esperado {
+				t.Errorf("call.%s: queria %q, veio %v", campo, esperado, call[campo])
+			}
+		}
+
+		if call["startedAt"] == float64(0) {
+			t.Error("call.startedAt veio zerado")
+		}
+
+		gravacao, _ := ev["recording"].(map[string]any)
+		if gravacao == nil || gravacao["durationMs"] != float64(17680) {
+			t.Errorf("o payload não trouxe a gravação: %v", ev["recording"])
+		}
 	}
 }
