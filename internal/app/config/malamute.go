@@ -1,6 +1,7 @@
 package config
 
 import (
+	"fmt"
 	"strconv"
 	"strings"
 	"time"
@@ -27,21 +28,64 @@ const (
 	DefaultDevicePlatform = "chrome"
 )
 
+// MaxRecordMB is the ceiling on the configurable recording size.
+//
+// The WAV header stores the data length in a uint32, so a file over 4 GiB would
+// have its size silently truncated by the wrap and come out corrupt. Today the
+// four-hour call limit puts the real maximum near 920 MB, so this is
+// unreachable; it exists so that raising the duration limit later cannot quietly
+// produce unplayable recordings.
+const MaxRecordMB = 4000
+
+// Problemas de configuração encontrados na leitura do ambiente.
+//
+// Devolvidos em vez de logados aqui porque este pacote não tem logger. Quem
+// carrega a configuração os escreve no boot: um valor que não parseia e cai no
+// padrão em silêncio faz o operador acreditar que limitou a gravação ou o toque
+// quando não limitou nada.
+var avisosDeConfig []string
+
+// AvisosDeConfig devolve o que foi ignorado na leitura do ambiente.
+func AvisosDeConfig() []string { return avisosDeConfig }
+
+func avisar(formato string, args ...any) {
+	avisosDeConfig = append(avisosDeConfig, fmt.Sprintf(formato, args...))
+}
+
 func parseRecordMaxBytes(raw string) int64 {
 	mb := DefaultRecordMaxMB
-	if n, err := strconv.Atoi(strings.TrimSpace(raw)); err == nil && n > 0 {
-		mb = n
+	texto := strings.TrimSpace(raw)
+
+	if texto != "" {
+		n, err := strconv.Atoi(texto)
+		switch {
+		case err != nil || n <= 0:
+			avisar("WACALLS_RECORD_MAX_MB=%q não é um número de megabytes válido, usando %d", raw, DefaultRecordMaxMB)
+		case n > MaxRecordMB:
+			avisar("WACALLS_RECORD_MAX_MB=%d passa do teto de %d MB do formato WAV, usando o teto", n, MaxRecordMB)
+			mb = MaxRecordMB
+		default:
+			mb = n
+		}
 	}
+
 	return int64(mb) << 20
 }
 
 // parseRingTimeout reads how long an unanswered call may ring. Zero means keep
-// whatever upstream decided, so an unset or unparsable value changes nothing.
+// whatever upstream decided, so an unset value changes nothing.
 func parseRingTimeout(raw string) time.Duration {
-	n, err := strconv.Atoi(strings.TrimSpace(raw))
-	if err != nil || n <= 0 {
+	texto := strings.TrimSpace(raw)
+	if texto == "" {
 		return 0
 	}
+
+	n, err := strconv.Atoi(texto)
+	if err != nil || n <= 0 {
+		avisar("WACALLS_RING_TIMEOUT_SEC=%q não é um número de segundos válido, mantendo o padrão", raw)
+		return 0
+	}
+
 	return time.Duration(n) * time.Second
 }
 
@@ -53,10 +97,15 @@ func parseDeviceName(raw string) string {
 }
 
 func parseDevicePlatform(raw string) string {
-	switch p := strings.ToLower(strings.TrimSpace(raw)); p {
+	texto := strings.ToLower(strings.TrimSpace(raw))
+
+	switch texto {
 	case "chrome", "firefox", "desktop", "safari", "edge":
-		return p
+		return texto
+	case "":
+		return DefaultDevicePlatform
 	default:
+		avisar("WACALLS_DEVICE_PLATFORM=%q não é uma plataforma conhecida, usando %q", raw, DefaultDevicePlatform)
 		return DefaultDevicePlatform
 	}
 }

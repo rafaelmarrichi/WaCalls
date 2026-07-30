@@ -100,3 +100,46 @@ func TestDevicePlatformFallsBack(t *testing.T) {
 		}
 	}
 }
+
+// Cair no padrão em silêncio faz o operador acreditar que limitou a gravação ou
+// o tempo de toque quando não limitou nada. Valor ruim precisa aparecer no boot.
+func TestConfiguracaoRuimVirouAviso(t *testing.T) {
+	avisosDeConfig = nil
+
+	parseRecordMaxBytes("50MB")
+	parseRingTimeout("abc")
+	parseDevicePlatform("netscape")
+
+	if len(AvisosDeConfig()) != 3 {
+		t.Errorf("esperava um aviso por valor ruim, veio %d: %v", len(AvisosDeConfig()), AvisosDeConfig())
+	}
+
+	// Variável ausente é o caso normal e não gera ruído no log.
+	avisosDeConfig = nil
+	parseRecordMaxBytes("")
+	parseRingTimeout("  ")
+	parseDevicePlatform("")
+
+	if len(AvisosDeConfig()) != 0 {
+		t.Errorf("variável não definida não deveria avisar: %v", AvisosDeConfig())
+	}
+}
+
+// O tamanho do bloco de dados do WAV é um uint32: acima de 4 GiB o cabeçalho
+// sairia truncado pelo wrap e o arquivo viraria lixo. Hoje é inalcançável pelo
+// limite de 4 h de chamada, e o teto existe para continuar assim se esse limite
+// mudar.
+func TestTetoDeGravacaoCabeNoCabecalhoWav(t *testing.T) {
+	avisosDeConfig = nil
+
+	got := parseRecordMaxBytes("999999")
+	if got != int64(MaxRecordMB)<<20 {
+		t.Errorf("teto: queria %d bytes, veio %d", int64(MaxRecordMB)<<20, got)
+	}
+	if got > int64(^uint32(0)) {
+		t.Errorf("o teto de %d bytes não cabe no uint32 do cabeçalho WAV", got)
+	}
+	if len(AvisosDeConfig()) == 0 {
+		t.Error("passar do teto precisa aparecer no log")
+	}
+}

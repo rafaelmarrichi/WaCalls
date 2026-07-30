@@ -56,6 +56,13 @@ func main() {
 	slog.SetDefault(log)
 	log.Info("wacalls starting", "version", version)
 
+	// Configuração que não parseou e caiu no padrão. Sem isto o operador acredita
+	// ter limitado a gravação ou o tempo de toque, e a campanha roda com outro
+	// valor sem nada em lugar nenhum que explique.
+	for _, aviso := range config.AvisosDeConfig() {
+		log.Warn("configuração ignorada", "detalhe", aviso)
+	}
+
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
