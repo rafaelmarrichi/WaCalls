@@ -33,7 +33,8 @@ var apiRoutes = []struct {
 	{"GET", "/sessions/{sid}/history/export", (*Server).handleHistoryExport},
 	{"GET", "/sessions/{sid}/contacts", (*Server).handleContactList},
 	{"POST", "/sessions/{sid}/contacts", (*Server).handleContactSave},
-	// Fork additions. See handlers_record.go.
+	// Fork additions. See handlers_record.go and handlers_onwhatsapp.go.
+	{"POST", "/sessions/{sid}/onwhatsapp", (*Server).handleOnWhatsApp},
 	{"POST", "/sessions/{sid}/calls/{id}/play", (*Server).handlePlay},
 	{"POST", "/sessions/{sid}/calls/{id}/stopplay", (*Server).handleStopPlay},
 	{"GET", "/sessions/{sid}/calls/{id}/recording", (*Server).handleRecordingGet},

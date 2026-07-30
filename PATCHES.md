@@ -219,6 +219,41 @@ levar o `tenantId` dentro, senão um tenant toca o aviso do outro.
 Requisições são limitadas a 1 MiB pelo middleware do upstream, cerca de 32 segundos de áudio, folga
 larga para um aviso de 4 a 6 segundos.
 
+## Patch 3: verificação de WhatsApp em lote
+
+`POST /api/sessions/{sid}/onwhatsapp`, com teto de 50 números por requisição.
+
+Discar para número sem WhatsApp queima tentativa, sobe a taxa de falha do chip e piora o padrão de
+comportamento da conta aos olhos da Meta. O upstream disca sem checar nada.
+
+**A decisão que importa está no alinhamento da resposta.** O `IsOnWhatsApp` do whatsmeow é uma
+consulta USync, e ela devolve só os usuários sobre os quais o servidor respondeu, em quantidade e
+ordem que não acompanham a pergunta. Casar por posição colocaria o resultado de um contato na linha
+de outro, e o importador marcaria como "sem WhatsApp" um número que tem, ou o contrário. Nada disso
+apareceria como erro em lugar nenhum.
+
+Por isso `alinharResultados` (em `internal/app/session/onwhatsapp.go`) é função pura e separada,
+casa pelo número e não pela posição, e **sempre devolve um item por número perguntado**. Tem teste
+que falha na implementação ingênua por índice.
+
+O `+` inicial é acrescentado aqui: o whatsmeow espera formato internacional com ele, e quem chama
+guarda o telefone sem. Normalizar num lugar só evita que cada chamador precise lembrar.
+
+O ritmo é responsabilidade de quem chama. Consultar em volume também chama atenção da Meta, então o
+worker de importação espaça os lotes e os distribui entre os chips do cliente. O teto por requisição
+é o que obriga isso a acontecer.
+
+| Arquivo                                      | O que é                          |
+| -------------------------------------------- | -------------------------------- |
+| `internal/app/session/onwhatsapp.go`         | consulta e alinhamento           |
+| `internal/app/session/onwhatsapp_test.go`    | testes do alinhamento            |
+| `internal/app/handlers_onwhatsapp.go`        | handler, tetos e validação       |
+| `internal/app/handlers_onwhatsapp_test.go`   | testes da borda HTTP             |
+
+Toca `internal/app/routes.go` (uma linha na tabela) e `internal/app/openapi.yaml`.
+
+---
+
 ## Patch 4: ajustes menores
 
 **Timeout de toque configurável.** `WACALLS_RING_TIMEOUT_SEC`, zero ou ausente mantém os 60 s do
