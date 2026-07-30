@@ -168,7 +168,21 @@ func (s *Server) handleRecordingDelete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	path, unconfigured, badID := s.recordingPath(sess.ID(), r.PathValue("id"))
+	id := r.PathValue("id")
+
+	// Same guard as the GET, and here it protects more than a confusing answer.
+	// Unlinking a file the recorder still holds open leaves it writing to an
+	// orphan inode; at teardown the header patch succeeds, the hash reopens by
+	// path and gets ENOENT, Close returns an error and the recording is never
+	// announced. The conversation is simply lost, quietly.
+	if sess.HasCall(id) {
+		writeJSON(w, http.StatusConflict, map[string]string{
+			"error": "the call is still in progress",
+		})
+		return
+	}
+
+	path, unconfigured, badID := s.recordingPath(sess.ID(), id)
 	if unconfigured || badID {
 		s.writeRecordingPathError(w, unconfigured)
 		return

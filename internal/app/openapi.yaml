@@ -511,7 +511,9 @@ paths:
       summary: Delete a recording from local disk
       description: >-
         Called after the recording has been stored elsewhere. Idempotent: a
-        recording that is already gone counts as deleted.
+        recording that is already gone counts as deleted. Refused while the call
+        is still in progress, because unlinking a file the recorder still holds
+        open loses the recording without any error surfacing.
       parameters:
         - $ref: "#/components/parameters/Sid"
         - $ref: "#/components/parameters/CallId"
@@ -527,6 +529,12 @@ paths:
         "401": { $ref: "#/components/responses/Unauthorized" }
         "404":
           description: Recording is not configured
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "409":
+          description: The call is still in progress
           content:
             application/json:
               schema:
