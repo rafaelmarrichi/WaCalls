@@ -377,6 +377,242 @@ paths:
                 $ref: "#/components/schemas/Error"
         "429": { $ref: "#/components/responses/RateLimited" }
         "500": { $ref: "#/components/responses/InternalError" }
+  /api/sessions/{sid}/calls/{id}/play:
+    post:
+      operationId: playAnnouncement
+      summary: Play a pre-recorded announcement into a live call
+      description: >-
+        Pushes an audio asset onto the call as if it came from the operator, paced
+        one 20 ms frame at a time. While it plays, audio arriving from the browser
+        leg is dropped rather than mixed, so the announcement cannot be talked
+        over. The announcement is included in the recording.
+
+
+        The returned duration tells the caller when the line is free. Completion
+        is also published on the event stream as call-announce-done, which is the
+        reliable signal because playback can be cut short.
+      parameters:
+        - $ref: "#/components/parameters/Sid"
+        - $ref: "#/components/parameters/CallId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [asset]
+              properties:
+                asset:
+                  type: string
+                  description: >-
+                    Asset name in the audio directory, without the .wav
+                    extension. Must match ^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$.
+                  example: aviso-tenant-abc
+                interruptible:
+                  type: boolean
+                  description: >-
+                    Barge-in is not implemented. Only false is accepted; true is
+                    rejected rather than silently ignored.
+                  default: false
+      responses:
+        "200":
+          description: Playback started
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [durationMs]
+                properties:
+                  durationMs:
+                    type: integer
+                    format: int64
+                    description: How long the asset takes to play.
+                    example: 4620
+        "400":
+          description: Missing asset, unsupported flag, or an asset that is not mono 16 kHz PCM
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404":
+          description: No such session, call, or asset, or announcements are not configured
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "500": { $ref: "#/components/responses/InternalError" }
+  /api/sessions/{sid}/calls/{id}/stopplay:
+    post:
+      operationId: stopAnnouncement
+      summary: Stop the announcement playing on a call
+      description: >-
+        Idempotent. Returns success whether or not an announcement was playing,
+        because teardown reaches this from more than one path.
+      parameters:
+        - $ref: "#/components/parameters/Sid"
+        - $ref: "#/components/parameters/CallId"
+      responses:
+        "204":
+          description: Nothing is playing on this call any more
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "500": { $ref: "#/components/responses/InternalError" }
+  /api/sessions/{sid}/calls/{id}/recording:
+    get:
+      operationId: getRecording
+      summary: Download the recording of a finished call
+      description: >-
+        Streams the stereo WAV written during the call: left channel is what was
+        sent to the contact (operator microphone plus any announcement), right
+        channel is what the contact sent. PCM signed 16-bit little endian, two
+        channels, 16 kHz.
+
+
+        Only available once the call has ended, because the two size fields in the
+        WAV header are written on close. Range requests are supported, so an
+        interrupted download can resume.
+      parameters:
+        - $ref: "#/components/parameters/Sid"
+        - $ref: "#/components/parameters/CallId"
+      responses:
+        "200":
+          description: The recording
+          content:
+            audio/wav:
+              schema:
+                type: string
+                format: binary
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404":
+          description: No recording for this call, or recording is not configured
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "409":
+          description: The call is still in progress, so the file is incomplete
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "500": { $ref: "#/components/responses/InternalError" }
+    delete:
+      operationId: deleteRecording
+      summary: Delete a recording from local disk
+      description: >-
+        Called after the recording has been stored elsewhere. Idempotent: a
+        recording that is already gone counts as deleted.
+      parameters:
+        - $ref: "#/components/parameters/Sid"
+        - $ref: "#/components/parameters/CallId"
+      responses:
+        "204":
+          description: The recording is no longer on disk
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404":
+          description: Recording is not configured
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "500": { $ref: "#/components/responses/InternalError" }
+  /api/audio/{name}:
+    put:
+      operationId: putAudioAsset
+      summary: Upload an announcement asset
+      description: >-
+        Stores an audio asset on the engine's disk so it can be played into calls.
+        The engine holds no storage credentials of its own, so the caller pushes
+        each asset here once. Keeping assets local also keeps the network off the
+        call setup path, where a slow fetch would mean a caller hearing silence.
+
+
+        The body is the raw WAV file, which must be mono, 16 kHz, 16-bit PCM.
+        Anything else is rejected rather than resampled. Re-uploading the same
+        name replaces the asset and the cached copy. Requests are capped at 1 MiB,
+        which is around 32 seconds of audio.
+      parameters:
+        - name: name
+          in: path
+          required: true
+          description: Asset name, without extension. Must match ^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$.
+          schema:
+            type: string
+          example: aviso-tenant-abc
+      requestBody:
+        required: true
+        content:
+          audio/wav:
+            schema:
+              type: string
+              format: binary
+      responses:
+        "200":
+          description: Asset stored
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [durationMs]
+                properties:
+                  durationMs:
+                    type: integer
+                    format: int64
+                    example: 4620
+        "400":
+          description: Invalid name, or a file that is not mono 16 kHz 16-bit PCM WAV
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404":
+          description: Announcements are not configured
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "413":
+          description: Body larger than 1 MiB
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "500": { $ref: "#/components/responses/InternalError" }
+    delete:
+      operationId: deleteAudioAsset
+      summary: Delete an announcement asset
+      description: Idempotent. An asset that is already gone counts as deleted.
+      parameters:
+        - name: name
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "204":
+          description: The asset is no longer available
+        "400":
+          description: Invalid asset name
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404":
+          description: Announcements are not configured
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "500": { $ref: "#/components/responses/InternalError" }
   /api/sessions/{sid}/history:
     get:
       operationId: listHistory

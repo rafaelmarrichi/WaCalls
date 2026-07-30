@@ -26,6 +26,10 @@ type webhookEvent struct {
 	Event  string     `json:"event"`
 	SentAt int64      `json:"sentAt"`
 	Call   CallRecord `json:"call"`
+	// Recording is set only on call.recording, which this fork adds. Kept a
+	// pointer with omitempty so the three upstream events keep their payload
+	// byte for byte and existing receivers are unaffected.
+	Recording *RecordingRecord `json:"recording,omitempty"`
 }
 
 type webhookDispatcher struct {

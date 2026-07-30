@@ -38,6 +38,10 @@ type Session struct {
 	bridges  map[string]*Bridge
 	grace    *graceKeeper
 
+	// Recording and announcement playback for this session's live calls.
+	// See recording.go.
+	audio *callAudio
+
 	// offlineReplaying is set while WhatsApp is replaying events buffered during downtime, so
 	// stale call offers from that window are dropped instead of surfacing as ghost ringing calls.
 	offlineReplaying atomic.Bool
@@ -65,6 +69,7 @@ func newSession(mgr *Manager, id, name string, client *whatsmeow.Client) *Sessio
 		client:  client,
 		auth:    events.AuthSnapshot{State: "connecting"},
 		bridges: map[string]*Bridge{},
+		audio:   newCallAudio(),
 	}
 	s.grace = newGraceKeeper(browserGraceWindow, func(callID string) {
 		s.log.Warn("call ended: browser did not return within the grace window", "call_id", callID)
@@ -123,6 +128,11 @@ func (s *Session) wireCall(callID string, cm *call.CallManager) {
 		}
 		if mapStatus(c.StateData.State) == events.StatusConnected && c.StateData.ConnectedAt != nil {
 			s.mgr.tracer.MarkActive(c.CallID, c.StateData.ConnectedAt.Sub(c.CreatedAt))
+			// Recording starts when the contact answers, not when we dial: an
+			// unanswered call has nothing to record and would leave an empty
+			// file behind for every attempt. Idempotent, because this state is
+			// reported again after a media reconnect.
+			s.startRecording(c.CallID, cm)
 		}
 		rec := events.CallRecord{
 			SessionID: s.id, CallID: c.CallID, Direction: dir, Peer: c.PeerJid,
@@ -143,6 +153,7 @@ func (s *Session) wireCall(callID string, cm *call.CallManager) {
 		s.mgr.broker.EndCall(c.CallID, string(c.StateData.EndReason))
 	}
 	cm.OnPeerAudio = func(pcm16 []float32) {
+		s.feedInbound(callID, pcm16)
 		if b := s.getBridge(callID); b != nil {
 			_ = b.WritePCM(pcm16)
 		}
@@ -305,6 +316,10 @@ func (s *Session) onBridgeDetached(callID string, bridge *Bridge) {
 }
 
 func (s *Session) removeCall(callID string) {
+	// Before the bridge goes away, so the last frames are on disk and the
+	// recording is announced while the call record still exists.
+	s.teardownCallAudio(callID)
+
 	s.bridgeMu.Lock()
 	b := s.bridges[callID]
 	delete(s.bridges, callID)
@@ -321,6 +336,10 @@ func (s *Session) terminateCall(callID string, reason core.EndCallReason) {
 }
 
 func (s *Session) teardownAllCalls() {
+	// Drain bypasses removeCall, so recordings still open here would leak a file
+	// handle and a goroutine per call on shutdown or client replacement.
+	s.teardownAllCallAudio()
+
 	for _, cm := range s.calls.Drain() {
 		_ = cm.EndCall(context.Background(), core.EndCallReasonUserEnded)
 	}

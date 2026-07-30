@@ -33,6 +33,13 @@ var apiRoutes = []struct {
 	{"GET", "/sessions/{sid}/history/export", (*Server).handleHistoryExport},
 	{"GET", "/sessions/{sid}/contacts", (*Server).handleContactList},
 	{"POST", "/sessions/{sid}/contacts", (*Server).handleContactSave},
+	// Fork additions. See handlers_record.go.
+	{"POST", "/sessions/{sid}/calls/{id}/play", (*Server).handlePlay},
+	{"POST", "/sessions/{sid}/calls/{id}/stopplay", (*Server).handleStopPlay},
+	{"GET", "/sessions/{sid}/calls/{id}/recording", (*Server).handleRecordingGet},
+	{"DELETE", "/sessions/{sid}/calls/{id}/recording", (*Server).handleRecordingDelete},
+	{"PUT", "/audio/{name}", (*Server).handleAudioPut},
+	{"DELETE", "/audio/{name}", (*Server).handleAudioDelete},
 	{"GET", "/version", (*Server).handleVersion},
 	{"POST", "/logout", (*Server).handleLogout},
 	{"POST", "/auth/password", (*Server).handlePassword},
@@ -118,7 +125,7 @@ func (s *Server) withCORS(next http.Handler) http.Handler {
 		origin := r.Header.Get("Origin")
 		if _, ok := s.allowedOrigins[origin]; ok && origin != "" {
 			w.Header().Set("Access-Control-Allow-Origin", origin)
-			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PATCH, DELETE, OPTIONS")
+			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS")
 			w.Header().Set("Access-Control-Allow-Headers", "Content-Type, X-Client-Id, Authorization")
 			w.Header().Set("Vary", "Origin")
 		}

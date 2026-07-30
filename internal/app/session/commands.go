@@ -74,15 +74,19 @@ func (s *Session) EndCall(ctx context.Context, callID string) error {
 }
 
 func (s *Session) AttachBrowser(callID, offerSDP string) (string, error) {
-	cm, ok := s.calls.Get(callID)
-	if !ok {
+	// The funnel resolves the call itself on every frame, so the manager is only
+	// needed here to reject an attach to a call that does not exist.
+	if _, ok := s.calls.Get(callID); !ok {
 		return "", fmt.Errorf("no such call %s", callID)
 	}
 	bridge, answer, err := NewBridge(s.mgr.webrtcAPI, offerSDP, s.log)
 	if err != nil {
 		return "", err
 	}
-	bridge.OnBrowserPCM = func(pcm []float32) { cm.FeedCapturedPCM(pcm) }
+	// Through the funnel rather than straight to the call: the microphone has to
+	// be recorded, and it has to be dropped while an announcement is playing.
+	// See feedOutbound in recording.go.
+	bridge.OnBrowserPCM = func(pcm []float32) { s.feedOutbound(callID, pcm, true) }
 	bridge.OnTerminalICE = func() { go s.onBridgeDetached(callID, bridge) }
 	s.setBridge(callID, bridge)
 	return answer, nil

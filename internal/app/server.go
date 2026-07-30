@@ -12,6 +12,7 @@ import (
 
 	"wacalls/internal/app/config"
 	"wacalls/internal/app/events"
+	"wacalls/internal/app/player"
 	"wacalls/internal/app/session"
 	"wacalls/internal/store"
 	"wacalls/internal/telemetry"
@@ -52,6 +53,8 @@ type Server struct {
 	auth           core.AuthStore
 	apiToken       string
 	loginLimiter   *ipRateLimiter
+	// Recording and announcements, for the endpoints in handlers_record.go.
+	audio session.AudioConfig
 }
 
 func parseOrigins(raw string) map[string]struct{} {
@@ -102,11 +105,25 @@ func NewServer(ctx context.Context, cfg config.Config, obsFactory func(string) c
 	}
 
 	broker := events.NewBroker(bundle.Calls, log)
+	audioCfg := session.AudioConfig{
+		RecordDir:      cfg.RecordDir,
+		RecordMaxBytes: cfg.RecordMaxBytes,
+		Library:        player.NewLibrary(cfg.AudioDir),
+	}
 	mgr := session.NewManager(session.Deps{
 		Ctx: ctx, Container: bundle.Container, WebRTCAPI: api, Broker: broker,
 		Store: bundle.Sessions, WALogger: waLogger, Log: log, MaxCalls: cfg.MaxCalls,
 		NewObserver: obsFactory, Tracer: tracer, Photos: bundle.Photos,
+		Audio: audioCfg,
 	})
+
+	if cfg.RecordDir != "" {
+		log.Warn("call recording enabled; every answered call writes a stereo WAV to disk",
+			"dir", cfg.RecordDir, "max_bytes", cfg.RecordMaxBytes)
+	}
+	if cfg.AudioDir != "" {
+		log.Info("announcement playback enabled", "dir", cfg.AudioDir)
+	}
 	broker.SnapshotFn = mgr.SnapshotEvents
 
 	if cfg.DiagDir != "" {
@@ -149,6 +166,7 @@ func NewServer(ctx context.Context, cfg config.Config, obsFactory func(string) c
 		auth:           bundle.Auth,
 		apiToken:       cfg.APIToken,
 		loginLimiter:   newIPRateLimiterWithBurst(loginRateRPS, loginRateBurst),
+		audio:          audioCfg,
 	}
 	go srv.loginLimiter.janitor(ctx)
 	srv.authorize = srv.authorizeRequest

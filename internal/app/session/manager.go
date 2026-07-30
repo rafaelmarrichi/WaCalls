@@ -31,6 +31,8 @@ type Manager struct {
 	newObserver func(string) core.CallObserver
 	tracer      telemetry.CallTracer
 	photos      core.ContactPhotoStore
+	// Recording and announcements. Zero value means both off. See recording.go.
+	audioCfg AudioConfig
 
 	mu       sync.RWMutex
 	sessions map[string]*Session
@@ -55,6 +57,7 @@ type Deps struct {
 	NewObserver func(string) core.CallObserver
 	Tracer      telemetry.CallTracer
 	Photos      core.ContactPhotoStore
+	Audio       AudioConfig
 }
 
 func NewManager(d Deps) *Manager {
@@ -76,6 +79,7 @@ func NewManager(d Deps) *Manager {
 		newObserver: d.NewObserver,
 		tracer:      d.Tracer,
 		photos:      d.Photos,
+		audioCfg:    d.Audio,
 		sessions:    map[string]*Session{},
 	}
 }

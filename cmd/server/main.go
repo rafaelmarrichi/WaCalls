@@ -36,6 +36,11 @@ func main() {
 	cfg := config.LoadConfig(*addr, *dbPath, *staticDir, *debug, *maxCalls)
 	cfg.Version = version
 
+	// Must run before the first whatsmeow client exists, because both of these
+	// are process-wide and are read when a device is linked.
+	applyDeviceProps(cfg)
+	applyRingTimeout(cfg)
+
 	if *runDoctor {
 		if !doctor.Doctor(context.Background(), cfg, os.Stdout) {
 			os.Exit(1)

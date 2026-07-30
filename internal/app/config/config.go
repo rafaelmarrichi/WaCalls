@@ -5,6 +5,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"time"
 )
 
 type Config struct {
@@ -27,6 +28,16 @@ type Config struct {
 	TrustedProxies string
 	DiagDir        string
 	STUNServers    []string
+
+	// Fork additions. Every one of these is inert when unset, so a binary built
+	// from this fork behaves like upstream until it is configured. Helpers and
+	// defaults live in malamute.go.
+	RecordDir      string        // empty disables recording entirely
+	RecordMaxBytes int64         // per-file ceiling
+	AudioDir       string        // empty disables announcements entirely
+	RingTimeout    time.Duration // zero keeps the upstream default
+	DeviceName     string        // name shown in the customer's linked-devices list
+	DevicePlatform string        // icon only, no effect on the name
 }
 
 func LoadConfig(addr, dbPath, staticDir string, debug bool, maxCalls int) Config {
@@ -49,6 +60,13 @@ func LoadConfig(addr, dbPath, staticDir string, debug bool, maxCalls int) Config
 		TrustedProxies: os.Getenv("WACALLS_TRUSTED_PROXIES"),
 		DiagDir:        strings.TrimSpace(os.Getenv("WACALLS_DIAG_DIR")),
 		STUNServers:    parseSTUNServers(os.Getenv("WACALLS_STUN_SERVER")),
+
+		RecordDir:      strings.TrimSpace(os.Getenv("WACALLS_RECORD_DIR")),
+		RecordMaxBytes: parseRecordMaxBytes(os.Getenv("WACALLS_RECORD_MAX_MB")),
+		AudioDir:       strings.TrimSpace(os.Getenv("WACALLS_AUDIO_DIR")),
+		RingTimeout:    parseRingTimeout(os.Getenv("WACALLS_RING_TIMEOUT_SEC")),
+		DeviceName:     parseDeviceName(os.Getenv("WACALLS_DEVICE_NAME")),
+		DevicePlatform: parseDevicePlatform(os.Getenv("WACALLS_DEVICE_PLATFORM")),
 	}
 }
 
