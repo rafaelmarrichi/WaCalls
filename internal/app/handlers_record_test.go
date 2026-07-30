@@ -68,19 +68,24 @@ func TestRecordingPathRejectsTraversal(t *testing.T) {
 	for _, callID := range []string{
 		"../../etc/passwd", "..", "a/b", "", ".hidden", "id with space", "id;rm",
 	} {
-		if path, ok := s.recordingPath("s1", callID); ok {
+		path, unconfigured, badID := s.recordingPath("s1", callID)
+		if !badID {
 			t.Errorf("call id %q was accepted and resolved to %s", callID, path)
+		}
+		if unconfigured {
+			t.Errorf("call id %q reported as unconfigured instead of malformed", callID)
 		}
 	}
 
 	for _, sessionID := range []string{"../other", "..", "s/1", ""} {
-		if path, ok := s.recordingPath(sessionID, "call1"); ok {
+		path, _, badID := s.recordingPath(sessionID, "call1")
+		if !badID {
 			t.Errorf("session id %q was accepted and resolved to %s", sessionID, path)
 		}
 	}
 
-	path, ok := s.recordingPath("s1", "call-abc")
-	if !ok {
+	path, unconfigured, badID := s.recordingPath("s1", "call-abc")
+	if unconfigured || badID {
 		t.Fatal("a legitimate pair was rejected")
 	}
 	if want := filepath.Join("/data/recordings", "s1", "call-abc.wav"); path != want {
@@ -125,12 +130,38 @@ func TestRecordingOfUnknownCallIs404(t *testing.T) {
 
 // With recording switched off there is no directory to serve from, and saying so
 // beats a confusing 500.
-func TestRecordingDisabledIs404(t *testing.T) {
+//
+// The message has to name the configuration, because the caller uses it to tell
+// a misconfigured engine (worth alerting on) from a call that simply has no
+// recording (routine). Reporting both the same way made them indistinguishable.
+func TestRecordingDisabledSaysSo(t *testing.T) {
 	s := recordServer(t, "", "")
 	rec := httptest.NewRecorder()
 	s.routes().ServeHTTP(rec, httptest.NewRequest("GET", "/api/sessions/s1/calls/call-1/recording", nil))
+
 	if rec.Code != 404 {
 		t.Fatalf("want 404, got %d %s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "not configured") {
+		t.Errorf("body should say recording is not configured, got %s", rec.Body.String())
+	}
+}
+
+// A malformed id is a bad request, not a missing recording. Same reason: the
+// caller has to be able to tell them apart.
+func TestMalformedIdOnRecordingIs400(t *testing.T) {
+	s := recordServer(t, t.TempDir(), "")
+
+	// %2e%2e%2f is "../" encoded, which survives the mux without being collapsed.
+	for _, path := range []string{
+		"/api/sessions/s1/calls/%2e%2e%2f%2e%2e%2fetc%2fpasswd/recording",
+		"/api/sessions/s1/calls/id%20com%20espaco/recording",
+	} {
+		rec := httptest.NewRecorder()
+		s.routes().ServeHTTP(rec, httptest.NewRequest("GET", path, nil))
+		if rec.Code != 400 {
+			t.Errorf("GET %s: want 400, got %d %s", path, rec.Code, rec.Body.String())
+		}
 	}
 }
 

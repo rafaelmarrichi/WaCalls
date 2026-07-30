@@ -90,16 +90,32 @@ func (s *Server) handleStopPlay(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
-// recordingPath resolves where a call's recording lives, rejecting anything that
-// could point outside the recording directory.
-func (s *Server) recordingPath(sessionID, callID string) (string, bool) {
+// recordingPath resolves where a call's recording lives.
+//
+// The two failure modes are kept apart on purpose. Recording being switched off
+// is a configuration fact the caller may want to alert on; an id that could
+// escape the recording directory is a bad request. Reporting both the same way
+// made them indistinguishable to the caller, which is how a misconfigured engine
+// looks exactly like a missing recording.
+func (s *Server) recordingPath(sessionID, callID string) (path string, unconfigured bool, badID bool) {
 	if s.audio.RecordDir == "" {
-		return "", false
+		return "", true, false
 	}
 	if !safeSegment.MatchString(sessionID) || !safeSegment.MatchString(callID) {
-		return "", false
+		return "", false, true
 	}
-	return filepath.Join(s.audio.RecordDir, sessionID, callID+".wav"), true
+	return filepath.Join(s.audio.RecordDir, sessionID, callID+".wav"), false, false
+}
+
+// writeRecordingPathError reports whichever of the two failures happened.
+func (s *Server) writeRecordingPathError(w http.ResponseWriter, unconfigured bool) {
+	if unconfigured {
+		writeJSON(w, http.StatusNotFound, map[string]string{
+			"error": "recording is not configured",
+		})
+		return
+	}
+	writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid session or call id"})
 }
 
 func (s *Server) handleRecordingGet(w http.ResponseWriter, r *http.Request) {
@@ -120,9 +136,9 @@ func (s *Server) handleRecordingGet(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	path, ok := s.recordingPath(sess.ID(), id)
-	if !ok {
-		writeJSON(w, http.StatusNotFound, map[string]string{"error": "recording not available"})
+	path, unconfigured, badID := s.recordingPath(sess.ID(), id)
+	if unconfigured || badID {
+		s.writeRecordingPathError(w, unconfigured)
 		return
 	}
 
@@ -152,9 +168,9 @@ func (s *Server) handleRecordingDelete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	path, ok := s.recordingPath(sess.ID(), r.PathValue("id"))
-	if !ok {
-		writeJSON(w, http.StatusNotFound, map[string]string{"error": "recording not available"})
+	path, unconfigured, badID := s.recordingPath(sess.ID(), r.PathValue("id"))
+	if unconfigured || badID {
+		s.writeRecordingPathError(w, unconfigured)
 		return
 	}
 
