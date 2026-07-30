@@ -132,6 +132,14 @@ func (s *Session) wireCall(callID string, cm *call.CallManager) {
 			// unanswered call has nothing to record and would leave an empty
 			// file behind for every attempt. Idempotent, because this state is
 			// reported again after a media reconnect.
+			//
+			// CAREFUL: this whole callback runs with the CallManager's mutex
+			// held (emitState calls it from six locked call sites). Nothing
+			// reachable from here may take that mutex. It happened once, and
+			// the symptom did not look like a deadlock at all: the contact
+			// answered, the log said "remote accepted call", and then the state
+			// never reached the broker, so no call.active webhook was ever sent
+			// and the call died as unanswered a minute later.
 			s.startRecording(c.CallID, cm)
 		}
 		rec := events.CallRecord{

@@ -47,6 +47,20 @@ Os arquivos do upstream recebem o mínimo, e cada toque está listado abaixo com
 
 Mais os testes correspondentes, que também são arquivos novos.
 
+### A trava que quase matou a Fase 3
+
+O `emitState` do upstream chama `OnStateChange` **com o mutex do `CallManager` tomado**, em seis
+lugares. O gravador começa a partir desse callback, e o getter `Observer()` que criamos tomava o mesmo
+mutex. Resultado: deadlock na goroutine que processa o atendimento.
+
+O sintoma não parecia deadlock nenhum. O contato atendia, o log dizia `remote accepted call`, e depois
+nada: o estado nunca chegava ao broker, nenhum `call.active` era enviado, e a chamada morria como não
+atendida um minuto depois.
+
+**Regra para quem mexer aqui:** nada alcançável a partir de `OnStateChange` pode tomar o mutex do
+`CallManager`. Há teste de regressão em `internal/voip/call/observer_access_test.go`, e ele falha na
+versão defeituosa.
+
 ### Arquivos do upstream tocados
 
 | Arquivo                            | Alteração                                                           |
