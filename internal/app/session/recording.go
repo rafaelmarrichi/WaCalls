@@ -183,6 +183,22 @@ func (s *Session) feedOutbound(callID string, pcm []float32, fromBrowser bool) {
 
 	s.recorderFor(callID).WriteOutbound(pcm)
 
+	// Injected audio also goes to the browser leg, so an agent who is already
+	// attached hears the announcement along with the contact.
+	//
+	// That is what lets the agent join during the announcement instead of after
+	// it: they hear it end and know exactly when they may speak, without
+	// watching a timer. Their microphone still cannot reach the contact until
+	// the announcement is over, which the check above guarantees.
+	//
+	// Only for injected audio. Echoing the microphone back would put the agent's
+	// own voice in their headset.
+	if !fromBrowser {
+		if b := s.getBridge(callID); b != nil {
+			_ = b.WritePCM(pcm)
+		}
+	}
+
 	if cm, ok := s.calls.Get(callID); ok {
 		cm.FeedCapturedPCM(pcm)
 	}

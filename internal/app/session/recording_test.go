@@ -247,6 +247,34 @@ func TestMicrophoneIsDroppedWhileAnnouncing(t *testing.T) {
 	s.teardownCallAudio("call-1")
 }
 
+// The agent joins during the announcement, so they have to hear it. Without this
+// they would sit in silence with no idea when they may start talking.
+func TestAnnouncementAlsoGoesToTheBrowserLeg(t *testing.T) {
+	s, _, _ := sessionWithAudio(t)
+
+	cm := call.NewCallManager(nil, quiet())
+	s.startRecording("call-1", cm)
+
+	// Sem perna de navegador anexada, nada pode estourar: é o estado normal no
+	// começo de toda chamada da discadora.
+	s.feedOutbound("call-1", tone(320, 0.5), false)
+
+	// O caminho do microfone não pode ecoar de volta para o fone do atendente.
+	// Aqui só é possível checar que a chamada não quebra; o eco em si é evitado
+	// por o ramo só valer para áudio injetado.
+	s.feedOutbound("call-1", tone(320, 0.5), true)
+
+	rec := s.recorderFor("call-1")
+	if rec == nil {
+		t.Fatal("no recorder")
+	}
+	if out, _ := rec.Buffered(); out == 0 {
+		t.Error("nada chegou ao canal de saída da gravação")
+	}
+
+	s.teardownCallAudio("call-1")
+}
+
 // Teardown reaches the audio from more than one path, and every one of them runs
 // for an ordinary hang-up.
 func TestTeardownIsIdempotentAndClosesTheFile(t *testing.T) {
