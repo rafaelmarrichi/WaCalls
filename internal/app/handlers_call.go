@@ -150,6 +150,15 @@ func (s *Server) handleCallGet(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) doReject(sess *session.Session, w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
+	// The call registry is process-wide and keyed by call ID alone, so the
+	// session in the path must be checked before touching it. Without this,
+	// rejecting with another session's call ID marks that call as ended in the
+	// registry, fires call.ended and drops it, while the real call stays up.
+	// Same guard the neighbouring handlers already use.
+	if !sess.HasCall(id) {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "no such call"})
+		return
+	}
 	var invalid *call.InvalidTransition
 	if err := sess.RejectCall(r.Context(), id); errors.As(err, &invalid) {
 		writeJSON(w, http.StatusConflict, map[string]string{"error": err.Error()})
@@ -191,6 +200,13 @@ func (s *Server) doMute(sess *session.Session, w http.ResponseWriter, r *http.Re
 
 func (s *Server) doEndCall(sess *session.Session, w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
+	// See doReject: the registry is keyed by call ID alone. Client.EndCall
+	// returns nil for an unknown ID rather than an error, so without this guard
+	// the mismatch is silent and only the registry side takes effect.
+	if !sess.HasCall(id) {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "no such call"})
+		return
+	}
 	_ = sess.EndCall(r.Context(), id)
 	s.broker.EndCall(id, string(core.EndCallReasonUserEnded))
 	w.WriteHeader(http.StatusNoContent)
